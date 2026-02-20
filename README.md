@@ -9,7 +9,7 @@ VITA 49.0 (VRT) over UDP for all IQ data and context metadata. No TCP control ch
 - VITA 49 compliant for market acceptance and tooling (Wireshark, GNU Radio)
 - 500 MHz ADC clock as master timestamp reference
 - Multi-radio phased array synchronization via shared PPS + clock
-- Three sample formats: 8-bit, 16-bit, 32-bit float IQ
+- Three sample formats: 8-bit, 16-bit, 32-bit signed integer IQ (sc8/sc16/sc32)
 - Clean operation at both 1500-byte and jumbo MTUs
 - Simple, deterministic FPGA implementation
 
@@ -192,9 +192,11 @@ Three supported formats, identified by the VRT **Data Packet Payload Format** fi
 
 | Format | I size | Q size | Bytes per sample | VRT Packing | Use case |
 |--------|--------|--------|-----------------|-------------|----------|
-| 8-bit integer | 8-bit signed | 8-bit signed | 2 | 2 samples per 32-bit word | Wideband survey, scanning |
-| 16-bit integer | 16-bit signed | 16-bit signed | 4 | 1 sample per 32-bit word | Primary — best throughput/dynamic range balance |
-| 32-bit float | 32-bit IEEE 754 | 32-bit IEEE 754 | 8 | 2 words per sample | Post-DDC, calibrated output |
+| 8-bit integer (sc8) | 8-bit signed | 8-bit signed | 2 | 2 samples per 32-bit word | Wideband survey, scanning |
+| 16-bit integer (sc16) | 16-bit signed | 16-bit signed | 4 | 1 sample per 32-bit word | Primary — best throughput/dynamic range balance |
+| 32-bit integer (sc32) | 32-bit signed | 32-bit signed | 8 | 2 words per sample | Full precision after DDC/decimation |
+
+All three formats are signed fixed-point integers. No floating-point conversion is performed in the FPGA — the sc32 format directly carries the full-width accumulator output from the decimation/DDC chain. Host-side drivers (SoapySDR, GNU Radio OOT module) convert to fc32 (float complex) if the application requests it. This is standard practice (matches Ettus UHD sc16→fc32 path) and avoids wasting FPGA resources on IEEE 754 conversion that Artix-7 has no hardware support for.
 
 ### VRT Data Packet Payload Format Field (8 bytes)
 
@@ -214,9 +216,9 @@ Word 1:
 
 | Format | RealCplx | DataFmt | Data Item Size | Packing |
 |--------|----------|---------|---------------|---------|
-| 8-bit int IQ | 01 (complex) | 0000 (signed fixed) | 8 | 01 (link-efficient) |
-| 16-bit int IQ | 01 (complex) | 0000 (signed fixed) | 16 | 01 (link-efficient) |
-| 32-bit float IQ | 01 (complex) | 0111 (IEEE 754) | 32 | 00 (processing-efficient) |
+| sc8 (8-bit int IQ) | 01 (complex) | 0000 (signed fixed) | 8 | 01 (link-efficient) |
+| sc16 (16-bit int IQ) | 01 (complex) | 0000 (signed fixed) | 16 | 01 (link-efficient) |
+| sc32 (32-bit int IQ) | 01 (complex) | 0000 (signed fixed) | 32 | 01 (link-efficient) |
 
 ### 32-bit word packing for each format
 
@@ -233,11 +235,11 @@ Word 1:
 │     16-bit        │     16-bit        │
 └───────────────────┴───────────────────┘
 
-32-bit float IQ (2 words per sample):
+32-bit integer IQ (2 words per sample):
 ┌───────────────────────────────────────┐
-│              I[n] (float32)           │
+│              I[n] (int32)             │
 ├───────────────────────────────────────┤
-│              Q[n] (float32)           │
+│              Q[n] (int32)             │
 └───────────────────────────────────────┘
 ```
 
@@ -260,9 +262,9 @@ Ethernet frame:   1518 bytes (incl. CRC)
 
 | Format | Samples/packet | Payload bytes | VRT packet (bytes) | VRT packet (words) |
 |--------|---------------|--------------|-------------------|-------------------|
-| 8-bit IQ | 726 | 1452 | 1472 | 368 |
-| 16-bit IQ | 363 | 1452 | 1472 | 368 |
-| 32-bit float | 181 | 1448 | 1468 | 367 |
+| sc8 | 726 | 1452 | 1472 | 368 |
+| sc16 | 363 | 1452 | 1472 | 368 |
+| sc32 | 181 | 1448 | 1468 | 367 |
 
 ### Jumbo Frames — 10GbE target (MTU ~9000)
 
@@ -276,9 +278,9 @@ Target VRT packet size: **8000 bytes** (2000 words) — clean number, safe margi
 
 | Format | Samples/packet | Payload bytes | VRT packet (bytes) | VRT packet (words) |
 |--------|---------------|--------------|-------------------|-------------------|
-| 8-bit IQ | 3990 | 7980 | 8000 | 2000 |
-| 16-bit IQ | 1995 | 7980 | 8000 | 2000 |
-| 32-bit float | 997 | 7976 | 7996 | 1999 |
+| sc8 | 3990 | 7980 | 8000 | 2000 |
+| sc16 | 1995 | 7980 | 8000 | 2000 |
+| sc32 | 997 | 7976 | 7996 | 1999 |
 
 ### Packet rate at various sample rates (16-bit IQ)
 
@@ -480,7 +482,7 @@ SoapySDR is the universal SDR abstraction layer. One driver enables:
 - Gqrx
 - Any SoapySDR-compatible application
 
-**Implementation:** C++ shared library implementing the SoapySDR API. Receives VRT packets, parses headers, delivers samples. Sends control commands for Phase 2.
+**Implementation:** C++ shared library implementing the SoapySDR API. Receives VRT packets, parses headers, delivers samples. Sends control commands for Phase 2. Performs sc16/sc32 → fc32 (float complex) conversion on the host using SIMD (SSE/AVX `CVTDQ2PS` on x86, NEON `vcvtq_f32_s32` on ARM). This matches the standard UHD model — integer on the wire, float to the application.
 
 #### 2. Native GNU Radio OOT module (`gr-yoursdr`)
 
@@ -600,7 +602,7 @@ Fits easily alongside ADC interface + decimation + DDC logic.
 
 ### Phase 2 — Multi-format + Jumbo + Multicast
 
-- Add 8-bit and 32-bit float format support
+- Add sc8 and sc32 format support
 - Jumbo frame support (8000-byte VRT packets)
 - Multicast for multiple listeners
 - Context packets with full CIF0 field set
