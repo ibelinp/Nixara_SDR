@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="assets/nixara_logo.svg" width="600" alt="NIXARA">
+</p>
+
+
 # FPGA SDR — VRT Protocol Specification & Recommendations
 
 ## 1. Protocol Overview
