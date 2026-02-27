@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/nixara_logo.svg" width="600" alt="NIXARA">
+  <img src="nixara_logo.svg" width="600" alt="NIXARA">
 </p>
 
 
